@@ -2085,6 +2085,53 @@ static int sysutil_getrlimit(lua_State * L)
 	return 2;
 }
 
+static int sysutil_setrlimit(lua_State * L)
+{
+	int what, ret, ntop;
+	struct rlimit rl;
+	lua_Integer luai;
+
+	luai = 0;
+	what = -1;
+	ntop = lua_gettop(L);
+	if (ntop >= 1 && sysutil_isinteger(L, 1, &luai))
+		what = (int) luai;
+	if (what == -1) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	rl.rlim_cur = 0;
+	rl.rlim_max = 0;
+	ret = getrlimit(what, &rl);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	luai = 0;
+	if (ntop >= 2 && sysutil_isinteger(L, 2, &luai)) {
+		rl.rlim_cur = (rlim_t) luai;
+		if (ntop >= 3 && sysutil_isinteger(L, 3, &luai))
+			rl.rlim_max = (rlim_t) luai;
+		ret = setrlimit(what, &rl);
+		if (ret == 0) {
+			lua_pushinteger(L, ret);
+			return 1;
+		}
+	} else {
+		errno = EINVAL;
+	}
+
+	ret = errno;
+	lua_pushnil(L);
+	lua_pushinteger(L, ret);
+	return 2;
+}
+
 static int sysutil_glob(lua_State * L)
 {
 	glob_t gt;
@@ -4118,6 +4165,7 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "sendto",         sysutil_sendto },
 	{ "setenv",         sysutil_setenv },
 	{ "setname",        sysutil_setname },
+	{ "setrlimit",      sysutil_setrlimit },
 	{ "sha256",         sysutil_sha256 },
 	{ "signal",         sysutil_signal },
 	{ "stat",           sysutil_stat },
