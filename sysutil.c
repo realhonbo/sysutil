@@ -42,6 +42,7 @@
 #ifdef SYSUTIL_SYSCALL
 #include <sys/syscall.h>
 #endif
+#include <sys/resource.h>
 #include <endian.h>
 
 #include <lua.h>
@@ -2045,6 +2046,43 @@ static int sysutil_stat(lua_State * L)
 		lua_setfield(L, -2, "isunk");
 	}
 	return 1;
+}
+
+static int sysutil_getrlimit(lua_State * L)
+{
+	int what, ret;
+	lua_Integer luai;
+	struct rlimit rl;
+
+	luai = 0;
+	what = -1;
+	ret = lua_gettop(L);
+	if (ret >= 1 && sysutil_isinteger(L, 1, &luai))
+		what = (int) luai;
+	if (what == -1) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	rl.rlim_cur = 0;
+	rl.rlim_max = 0;
+	ret = getrlimit(what, &rl);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	if (sizeof(lua_Integer) == 8) {
+		lua_pushinteger(L, (lua_Integer) rl.rlim_cur);
+		lua_pushinteger(L, (lua_Integer) rl.rlim_max);
+	} else {
+		lua_pushnumber(L, (lua_Number) rl.rlim_cur);
+		lua_pushnumber(L, (lua_Number) rl.rlim_max);
+	}
+	return 2;
 }
 
 static int sysutil_glob(lua_State * L)
@@ -4053,6 +4091,7 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "getpid",         sysutil_getpid },
 	{ "getppid",        sysutil_getppid },
 	{ "getcwd",         sysutil_getcwd },
+	{ "getrlimit",      sysutil_getrlimit },
 	{ "glob",           sysutil_glob },
 	{ "inotify",        sysutil_inotify },
 	{ "kill",           sysutil_kill },
