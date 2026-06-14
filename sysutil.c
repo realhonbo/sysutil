@@ -26,6 +26,7 @@
 #include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -35,6 +36,11 @@
 #include <sys/inotify.h>
 #include <termios.h>
 #include <libgen.h>
+
+#ifdef SYSUTIL_SYSCALL
+#include <sys/syscall.h>
+#endif
+#include <endian.h>
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -123,14 +129,14 @@ static int sysutil_uptime(lua_State * L)
 
 	if (sizeof(lua_Integer) == 8) {
 		lua_pushinteger(L, (lua_Integer) uptim.tv_sec);
-	} else if (uptim.tv_sec < 0 || uptim.tv_sec >= 0x7FFFFFFF) {
+	} else if (uptim.tv_sec < 0 || uptim.tv_sec > 0x7FFFFFFF) {
 		unsigned long long tvsec = (unsigned long long) uptim.tv_sec;
 		lua_pushnumber(L, (lua_Number) tvsec);
 	} else {
 		lua_pushinteger(L, (lua_Integer) uptim.tv_sec);
 	}
 
-	if (ntop >= 2 && lua_type(L, 2) == LUA_TBOOLEAN && lua_toboolean(L, 2))
+	if (ntop >= 2 && lua_toboolean(L, 2))
 		lua_pushinteger(L, (lua_Integer) uptim.tv_nsec);
 	else
 		lua_pushinteger(L, (lua_Integer) (uptim.tv_nsec / 1000000));
@@ -308,9 +314,6 @@ static int sysutil_call(lua_State * L)
 	int options, dtype;
 	int ret, ntop, error;
 
-	inlen = 0;
-	error = 0;
-	input = NULL;
 	ret = sysutil_checkstack(L, 4);
 	if (ret < 0)
 		return 0;
@@ -339,6 +342,8 @@ static int sysutil_call(lua_State * L)
 	}
 
 	error = 0;
+	inlen = 0;
+	input = NULL;
 	if (dtype == LUA_TSTRING) {
 		int idx;
 		for (idx = 2; idx <= ntop; ++idx) {
@@ -463,15 +468,18 @@ static int sysutil_setname(lua_State * L)
 
 	memset(thname, 0, sizeof(thname));
 	strncpy(thname, tname, sizeof(thname) - 1);
-	ret = prctl(PR_SET_NAME, (unsigned long) thname, 0, 0, 0);
-	if (ret == -1) {
+	if (ntop >= 2 && lua_toboolean(L, 2))
+		ret = pthread_setname_np(pthread_self(), thname);
+	else
+		ret = prctl(PR_SET_NAME, (unsigned long) thname, 0, 0, 0);
+	if (ret != 0) {
 		int error = errno;
 		lua_pushnil(L);
 		lua_pushinteger(L, error);
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, ret);
 	return 1;
 }
 
@@ -709,6 +717,126 @@ static int sysutil_tcpcheck(lua_State * L)
 	return 1;
 }
 
+static int sysutil_timestr(lua_State * L)
+{
+	time_t then;
+	char tbuf[64];
+	struct tm tim, * pt;
+	int ret, msec, isutc;
+
+	then = 0;
+	msec = -1;
+	isutc = 0;
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+
+	ret = lua_gettop(L) >= 1 ? lua_type(L, 1) : LUA_TNIL;
+	if (ret == LUA_TNIL) {
+		struct timespec spec;
+		spec.tv_sec = 0;
+		spec.tv_nsec = 0;
+		clock_gettime(CLOCK_REALTIME, &spec);
+		then = spec.tv_sec;
+		msec = (int) (spec.tv_nsec / 1000000);
+		if (lua_type(L, 2) == LUA_TBOOLEAN)
+			isutc = lua_toboolean(L, 2);
+	} else if (ret == LUA_TNUMBER) {
+		then = (time_t) lua_tonumber(L, 1);
+		if (lua_type(L, 2) == LUA_TNUMBER)
+			msec = (int) (lua_tointeger(L, 2) % 1000);
+		if (lua_type(L, 3) == LUA_TBOOLEAN)
+			isutc = lua_toboolean(L, 3);
+	} else {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	memset(&tim, 0, sizeof(tim));
+	if (isutc != 0)
+		pt = gmtime_r(&then, &tim);
+	else
+		pt = localtime_r(&then, &tim);
+	if (pt == NULL)
+		pt = &tim;
+
+	if (msec >= 0)
+		ret = snprintf(tbuf, sizeof(tbuf), "%d-%02d-%02d %02d:%02d:%02d.%03d",
+			pt->tm_year + 1900, pt->tm_mon + 1, pt->tm_mday,
+			pt->tm_hour, pt->tm_min, pt->tm_sec, msec);
+	else
+		ret = snprintf(tbuf, sizeof(tbuf), "%d-%02d-%02d %02d:%02d:%02d",
+			pt->tm_year + 1900, pt->tm_mon + 1, pt->tm_mday,
+			pt->tm_hour, pt->tm_min, pt->tm_sec);
+
+	if (ret <= 0) {
+		tbuf[sizeof(tbuf) - 1] = '\0';
+		lua_pushstring(L, tbuf);
+		return 1;
+	}
+
+	if (ret >= sizeof(tbuf))
+		ret = (int) (sizeof(tbuf) - 1);
+	lua_pushlstring(L, tbuf, (size_t) ret);
+	return 1;
+}
+
+static int sysutil_timedur(lua_State * L)
+{
+	char tbuf[64];
+	lua_Number dur;
+	int ret, dsec, hsec, days;
+
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+	ret = lua_type(L, 1);
+	if (ret != LUA_TNUMBER) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	dur = lua_tonumber(L, 1);
+	if (dur < 0) {
+		lua_pushnil(L);
+		lua_pushinteger(L, ERANGE);
+		return 2;
+	}
+
+	if (lua_gettop(L) >= 2 &&
+		lua_type(L, 2) == LUA_TBOOLEAN &&
+		lua_toboolean(L, 2) != 0) {
+		long long d = (long long) dur;
+		int msec = (int) (d % 1000);
+		d /= 1000;
+		days = (int) (d / 86400);
+		dsec = (int) (d % 86400);
+		hsec = dsec % 3600;
+		ret = snprintf(tbuf, sizeof(tbuf), "%d %s, %02d:%02d:%02d.%03d",
+			days, days >= 2 ? "days" : "day",
+			dsec / 3600, hsec / 60, hsec % 60, msec);
+	} else {
+		long long d = (long long) dur;
+		days = (int) (d / 86400);
+		dsec = (int) (d % 86400);
+		hsec = dsec % 3600;
+		ret = snprintf(tbuf, sizeof(tbuf), "%d %s, %02d:%02d:%02d",
+			days, days >= 2 ? "days" : "day",
+			dsec / 3600, hsec / 60, hsec % 60);
+	}
+
+	if (ret <= 0) {
+		tbuf[sizeof(tbuf) - 1] = '\0';
+		lua_pushstring(L, tbuf);
+		return 1;
+	}
+
+	if (ret >= sizeof(tbuf))
+		ret = (int) (sizeof(tbuf) - 1);
+	lua_pushlstring(L, tbuf, (size_t) ret);
+	return 1;
+}
+
 static int sysutil_mountpoint(lua_State * L)
 {
 	int ntop;
@@ -731,6 +859,57 @@ err0:
 		goto err0;
 	lua_pushboolean(L, appf_mountpoint(mpath) == 0);
 	return 1;
+}
+
+static int sysutil_fcntl_common(lua_State * L,
+	int opgflag, int opsflag, int setflag)
+{
+	lua_Integer luai;
+	int tmpval, fd, setval;
+
+	fd = -1;
+	setval = 0;
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+
+	luai = 0;
+	tmpval = lua_gettop(L);
+	if (tmpval >= 1 && sysutil_isinteger(L, 1, &luai))
+		fd = (int) luai;
+	if (tmpval >= 2)
+		setval = lua_toboolean(L, 2);
+
+	tmpval = fcntl(fd, opgflag, 0ul);
+	if (tmpval == -1) {
+		tmpval = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, tmpval);
+		return 2;
+	}
+
+	if (setval != 0)
+		setval = tmpval | setflag;
+	else
+		setval = tmpval & ~setflag;
+	if (tmpval == setval) {
+		lua_pushinteger(L, 0);
+		return 1;
+	}
+
+	if (fcntl(fd, opsflag, setval) == -1) {
+		tmpval = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, tmpval);
+		return 2;
+	}
+
+	lua_pushinteger(L, 0);
+	return 1;
+}
+
+static int sysutil_nonblock(lua_State * L)
+{
+	return sysutil_fcntl_common(L, F_GETFL, F_SETFL, O_NONBLOCK);
 }
 
 static int sysutil_read(lua_State * L)
@@ -794,7 +973,7 @@ static int sysutil_read(lua_State * L)
 	}
 
 	luai = 0;
-	maxlen = 256 * 1024 * 1024; /* 256MB */
+	maxlen = 512 * 1024 * 1024; /* 512MB */
 	if (flen >= 3 && sysutil_isinteger(L, 3, &luai))
 		maxlen = (size_t) luai;
 	if (flen > maxlen)
@@ -839,7 +1018,6 @@ static int sysutil_waitpid(lua_State * L)
 	int ntop, nohang, est;
 
 	pid = 0;
-	nohang = 0;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 
@@ -853,9 +1031,8 @@ static int sysutil_waitpid(lua_State * L)
 		return 2;
 	}
 
-	if (ntop >= 2 &&
-		lua_type(L, 2) == LUA_TBOOLEAN &&
-		lua_toboolean(L, 2))
+	nohang = 0;
+	if (ntop >= 2 && lua_toboolean(L, 2))
 		nohang = WNOHANG;
 
 again:
@@ -896,11 +1073,20 @@ static int sysutil_write(lua_State * L)
 	if (ret == LUA_TNUMBER) {
 		fd = (int) lua_tointeger(L, 1);
 		if (fd < 0)
-			errno = ERANGE;
+			errno = EBADF;
 	} else if (ret == LUA_TSTRING) {
 		filp = lua_tolstring(L, 1, NULL);
-		if (filp && filp[0])
-			fd = open(filp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+		if (filp && filp[0]) {
+			int type3 = lua_type(L, 3);
+			int oflags = O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC;
+			if (type3 == LUA_TNUMBER) {
+				lua_Integer luai = lua_tointeger(L, 3);
+				lua_Number luan = lua_tonumber(L, 3);
+				if (luai >= 0 && luan == (lua_Number) luai)
+					oflags = (int) luai;
+			}
+			fd = open(filp, oflags, 0644);
+		}
 		else
 			errno = EINVAL;
 	}
@@ -945,26 +1131,29 @@ static int sysutil_write(lua_State * L)
 
 static int sysutil_kill_common(lua_State * L, int istid)
 {
-	lua_Integer pid;
+	lua_Integer pid_;
 	lua_Integer luai;
+	unsigned long pid;
 	int ntop, signo, error;
 
-	pid = 0;
-	error = 0;
+	pid_ = 0;
 	signo = 0;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 
 	ntop = lua_gettop(L);
-	if (ntop < 1 || sysutil_isinteger(L, 1, &pid) == 0) {
+	if (ntop < 1 || sysutil_isinteger(L, 1, &pid_) == 0) {
 		lua_pushnil(L);
 		lua_pushinteger(L, EINVAL);
 		return 2;
 	}
 
 	luai = 0;
+	error = 0;
+	pid = (unsigned long) pid_;
 	if (ntop >= 2 && sysutil_isinteger(L, 2, &luai))
 		signo = (int) luai;
+
 	switch (istid) {
 	case SYSUTIL_KILL:
 		if (kill((pid_t) pid, signo) == -1)
@@ -990,7 +1179,8 @@ static int sysutil_kill_common(lua_State * L, int istid)
 		lua_pushinteger(L, error);
 		return 2;
 	}
-	lua_pushboolean(L, 1);
+
+	lua_pushinteger(L, error);
 	return 1;
 }
 
@@ -1028,7 +1218,7 @@ static int sysutil_sha256(lua_State * L)
 	if (isfile) {
 		int fd, error;
 		unsigned char * bufp;
-		const size_t rsize = 1024 * 1024;
+		const size_t rsize = 256 * 1024;
 
 		fd = open(filp, O_RDONLY | O_CLOEXEC);
 		if (fd == -1) {
@@ -1074,9 +1264,7 @@ static int sysutil_sha256(lua_State * L)
 	}
 
 	zsha256_final(&sha256, NULL, 0);
-	if (ntop >= 3 &&
-		lua_type(L, 3) == LUA_TBOOLEAN &&
-		lua_toboolean(L, 3)) {
+	if (ntop >= 3 && lua_toboolean(L, 3)) {
 		char out[ZSHA256_STRSIZE];
 		memset(out, 0, sizeof(out));
 		zsha256_hex(out, sizeof(out), &sha256);
@@ -1086,6 +1274,75 @@ static int sysutil_sha256(lua_State * L)
 
 	lua_pushlstring(L, (const char *) sha256.hashval, 32);
 	return 1;
+}
+
+static int sysutil_signal(lua_State * L)
+{
+	int signo, ntop, error;
+	lua_Integer luai;
+	const char * pfunc;
+	unsigned long func;
+
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+
+	error = 0;
+	luai = -1;
+	signo = -1;
+	ntop = lua_gettop(L);
+	if (ntop >= 1 && sysutil_isinteger(L, 1, &luai))
+		signo = (int) luai;
+	if (signo <= 0) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	if (ntop >= 2 && lua_type(L, 2) == LUA_TBOOLEAN) {
+		sighandler_t ret;
+		if (lua_toboolean(L, 2) != 0)
+			ret = signal(signo, SIG_IGN);
+		else
+			ret = signal(signo, SIG_DFL);
+		if (ret == SIG_ERR) {
+			error = errno;
+			lua_pushnil(L);
+			if (error == 0)
+				error = EPERM;
+		}
+		lua_pushinteger(L, error);
+		return error ? 2 : 1;
+	}
+
+	error = 0;
+	func = 0ul;
+	pfunc = NULL;
+	if (ntop >= 2 && lua_type(L, 2) == LUA_TSTRING)
+		pfunc = lua_tolstring(L, 2, NULL);
+	if (pfunc != NULL && pfunc[0] != '\0') {
+		char * endptr;
+		errno = 0;
+		endptr = NULL;
+		func = (unsigned long) strtoull(pfunc, &endptr, 0);
+		error = errno;
+		if (func == ~0ul || endptr == pfunc)
+			func = 0ul;
+	}
+
+	if (func == 0ul || error != 0) {
+		lua_pushnil(L);
+		lua_pushinteger(L, error ? : EFAULT);
+		return 2;
+	}
+
+	if (signal(signo, (sighandler_t) func) == SIG_ERR) {
+		error = errno;
+		lua_pushnil(L);
+		if (error == 0)
+			error = EPERM;
+	}
+	lua_pushinteger(L, error);
+	return error ? 2 : 1;
 }
 
 static int sysutil_zipstdio(lua_State * L)
@@ -1100,38 +1357,70 @@ static int sysutil_zipstdio(lua_State * L)
 		if (pdev && pdev[0] == '\0')
 			pdev = NULL;
 	}
-	lua_pushboolean(L, appf_zipstdio(pdev, 0) == 0);
+	lua_pushinteger(L, appf_zipstdio(pdev, 0));
 	return 1;
 }
 
 static int sysutil_getpid(lua_State * L)
 {
-	pid_t pid;
+	unsigned long pid;
 	if (sysutil_checkstack(L, 1) < 0)
 		return 0;
-	pid = getpid();
-	lua_pushinteger(L, (lua_Integer) pid);
+
+	pid = (unsigned long) getpid();
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) pid);
+	else if (pid >= 0x80000000ul)
+		lua_pushnumber(L, (lua_Number) pid);
+	else
+		lua_pushinteger(L, (lua_Integer) pid);
 	return 1;
 }
 
 static int sysutil_getppid(lua_State * L)
 {
-	pid_t pid;
+	unsigned long pid;
 	if (sysutil_checkstack(L, 1) < 0)
 		return 0;
-	pid = getppid();
-	lua_pushinteger(L, (lua_Integer) pid);
+
+	pid = (unsigned long) getppid();
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) pid);
+	else if (pid >= 0x80000000ul)
+		lua_pushnumber(L, (lua_Number) pid);
+	else
+		lua_pushinteger(L, (lua_Integer) pid);
 	return 1;
 }
 
 static int sysutil_getid(lua_State * L)
 {
-	pthread_t tid;
-	if (sysutil_checkstack(L, 1) < 0)
+	unsigned long pid;
+	unsigned long tid;
+	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
-	tid = pthread_self();
-	lua_pushinteger(L, (lua_Integer) tid);
-	return 1;
+
+#ifdef SYSUTIL_SYSCALL
+	pid = (unsigned long) syscall(SYS_gettid, 0ul, 0ul);
+#else
+	pid = (unsigned long) gettid();
+#endif
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) pid);
+	else if (pid >= 0x80000000ul)
+		lua_pushnumber(L, (lua_Number) pid);
+	else
+		lua_pushinteger(L, (lua_Integer) pid);
+
+	tid = (unsigned long) pthread_self();
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) tid);
+	else if (tid >= 0x80000000ul)
+		lua_pushnumber(L, (lua_Number) tid);
+	else
+		lua_pushinteger(L, (lua_Integer) tid);
+
+	return 2;
 }
 
 static int sysutil_killid(lua_State * L)
@@ -1166,14 +1455,14 @@ static int sysutil_readlink(lua_State * L)
 		return 2;
 	}
 
-	output = (char *) malloc(2048);
+	output = (char *) malloc(4096);
 	if (output == NULL) {
 		lua_pushnil(L);
 		lua_pushinteger(L, ENOMEM);
 		return 2;
 	}
 
-	rl1 = readlink(linkp, output, 2048);
+	rl1 = readlink(linkp, output, 4096);
 	if (rl1 < 0) {
 		int error = errno;
 		free(output);
@@ -1183,8 +1472,8 @@ static int sysutil_readlink(lua_State * L)
 		return 2;
 	}
 
-	if (rl1 > 2048)
-		rl1 = 2048;
+	if (rl1 > 4096)
+		rl1 = 4096;
 	lua_pushlstring(L, output, (size_t) rl1);
 	free(output);
 	return 1;
@@ -1196,8 +1485,6 @@ static int sysutil_realpath(lua_State * L)
 	char * real;
 	const char * unreal;
 
-	real = NULL;
-	unreal = NULL;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 	ntop = lua_gettop(L);
@@ -1230,7 +1517,7 @@ static int sysutil_realpath(lua_State * L)
 		return 2;
 	}
 
-	real[4096 - 1] = '\0';
+	real[4095] = '\0';
 	lua_pushstring(L, real);
 	free(real);
 	return 1;
@@ -1258,7 +1545,7 @@ static int sysutil_rename(lua_State * L)
 		path0 = lua_tolstring(L, 1, &len0);
 	if (lua_type(L, 2) == LUA_TSTRING)
 		path1 = lua_tolstring(L, 2, &len1);
-	if (len0 == 0 || len1 == 0) {
+	if (path0 == NULL || path1 == NULL || len0 == 0 || len1 == 0) {
 		lua_pushnil(L);
 		lua_pushinteger(L, EFAULT);
 		return 2;
@@ -1272,7 +1559,7 @@ static int sysutil_rename(lua_State * L)
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, ret);
 	return 1;
 }
 
@@ -1373,7 +1660,7 @@ static int sysutil_mkdir(lua_State * L)
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, ret);
 	return 1;
 }
 
@@ -1410,7 +1697,7 @@ static int sysutil_stat(lua_State * L)
 		return 2;
 	}
 
-	lua_createtable(L, 0, 20);
+	lua_createtable(L, 0, 15);
 
 	if (sizeof(lua_Integer) == 0x8)
 		lua_pushinteger(L, (lua_Integer) fst.st_dev);
@@ -1441,8 +1728,12 @@ static int sysutil_stat(lua_State * L)
 
 	if (sizeof(lua_Integer) == 0x8)
 		lua_pushinteger(L, (lua_Integer) fst.st_size);
-	else
-		lua_pushnumber(L, (lua_Number) fst.st_size);
+	else if (fst.st_size >= 0 && fst.st_size <= 0x7FFFFFFF)
+		lua_pushinteger(L, (lua_Integer) fst.st_size);
+	else {
+		unsigned long long size = (unsigned long long) fst.st_size;
+		lua_pushnumber(L, (lua_Number) size);
+	}
 	lua_setfield(L, -2, "st_size");
 
 	lua_pushinteger(L, (lua_Integer) fst.st_blksize);
@@ -1451,35 +1742,54 @@ static int sysutil_stat(lua_State * L)
 	lua_pushinteger(L, (lua_Integer) fst.st_blocks);
 	lua_setfield(L, -2, "st_blocks");
 
-	lua_pushinteger(L, (lua_Integer) fst.st_atime);
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) fst.st_atime);
+	else if (fst.st_atime >= 0 && fst.st_atime <= 0x7FFFFFFF)
+		lua_pushinteger(L, (lua_Integer) fst.st_atime);
+	else {
+		unsigned long long t = (unsigned long long) fst.st_atime;
+		lua_pushnumber(L, (lua_Number) t);
+	}
 	lua_setfield(L, -2, "st_atime");
 
-	lua_pushinteger(L, (lua_Integer) fst.st_mtime);
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) fst.st_mtime);
+	else if (fst.st_mtime >= 0 && fst.st_mtime <= 0x7FFFFFFF)
+		lua_pushinteger(L, (lua_Integer) fst.st_mtime);
+	else {
+		unsigned long long t = (unsigned long long) fst.st_mtime;
+		lua_pushnumber(L, (lua_Number) t);
+	}
 	lua_setfield(L, -2, "st_mtime");
 
-	lua_pushinteger(L, (lua_Integer) fst.st_ctime);
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) fst.st_ctime);
+	else if (fst.st_ctime >= 0 && fst.st_ctime <= 0x7FFFFFFF)
+		lua_pushinteger(L, (lua_Integer) fst.st_ctime);
+	else {
+		unsigned long long t = (unsigned long long) fst.st_ctime;
+		lua_pushnumber(L, (lua_Number) t);
+	}
 	lua_setfield(L, -2, "st_ctime");
 
-	lua_pushboolean(L, S_ISREG(fst.st_mode) != 0);
-	lua_setfield(L, -2, "isreg");
-
-	lua_pushboolean(L, S_ISDIR(fst.st_mode) != 0);
-	lua_setfield(L, -2, "isdir");
-
-	lua_pushboolean(L, S_ISLNK(fst.st_mode) != 0);
-	lua_setfield(L, -2, "issym");
-
-	lua_pushboolean(L, S_ISCHR(fst.st_mode) != 0);
-	lua_setfield(L, -2, "ischr");
-
-	lua_pushboolean(L, S_ISBLK(fst.st_mode) != 0);
-	lua_setfield(L, -2, "isblk");
-
-	lua_pushboolean(L, S_ISFIFO(fst.st_mode) != 0);
-	lua_setfield(L, -2, "isfifo");
-
-	lua_pushboolean(L, S_ISSOCK(fst.st_mode) != 0);
-	lua_setfield(L, -2, "issock");
+	lua_pushboolean(L,  1);
+	if (S_ISREG(fst.st_mode)) {
+		lua_setfield(L, -2, "isreg");
+	} else if (S_ISDIR(fst.st_mode)) {
+		lua_setfield(L, -2, "isdir");
+	} else if (S_ISLNK(fst.st_mode)) {
+		lua_setfield(L, -2, "issym");
+	} else if (S_ISCHR(fst.st_mode)) {
+		lua_setfield(L, -2, "ischr");
+	} else if (S_ISBLK(fst.st_mode)) {
+		lua_setfield(L, -2, "isblk");
+	} else if (S_ISFIFO(fst.st_mode)) {
+		lua_setfield(L, -2, "isfifo");
+	} else if (S_ISSOCK(fst.st_mode)) {
+		lua_setfield(L, -2, "issock");
+	} else {
+		lua_setfield(L, -2, "isunk");
+	}
 	return 1;
 }
 
@@ -1490,7 +1800,6 @@ static int sysutil_glob(lua_State * L)
 	int flags, ntop, ret;
 	const char * pattern;
 
-	luai = 0;
 	flags = 0;
 	pattern = NULL;
 	if (sysutil_checkstack(L, 2) < 0)
@@ -1504,6 +1813,8 @@ static int sysutil_glob(lua_State * L)
 		lua_pushinteger(L, EFAULT);
 		return 2;
 	}
+
+	luai = 0;
 	if (ntop >= 2 && sysutil_isinteger(L, 2, &luai))
 		flags = (int) luai;
 
@@ -1544,6 +1855,8 @@ static int sysutil_glob(lua_State * L)
 }
 
 static int sysutil_inotify_read(lua_State * L,
+	int ifd, const int * pfds, int pfdnum) __attribute__((__noinline__));
+int sysutil_inotify_read(lua_State * L,
 	int ifd, const int * pfds, int pfdnum)
 {
 	char * pbuf;
@@ -1714,50 +2027,137 @@ err0:
 
 static int sysutil_chdir(lua_State * L)
 {
-	int ntop, error;
-	const char * newdir;
+	int ntop, ret;
+	const char * dir;
 
-	error = 0;
-	newdir = NULL;
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+
+	dir = NULL;
+	ntop = lua_gettop(L);
+	if (ntop >= 1 && lua_type(L, 1) == LUA_TSTRING)
+		dir = lua_tolstring(L, 1, NULL);
+
+	if (dir == NULL || dir[0] == '\0') {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	ret = chdir(dir);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	lua_pushinteger(L, ret);
+	return 1;
+}
+
+static int sysutil_getwd(lua_State * L)
+{
+	char * dir, * rdir;
+	if (sysutil_checkstack(L, 2) < 0)
+		return 0;
+
+	dir = (char *) calloc(0x1, APPUTIL_BUFSIZE);
+	if (dir == NULL) {
+		lua_pushnil(L);
+		lua_pushinteger(L, ENOMEM);
+		return 2;
+	}
+
+	rdir = getcwd(dir, APPUTIL_BUFSIZE - 1);
+	if (rdir == NULL) {
+		int error = errno;
+		free(dir);
+		lua_pushnil(L);
+		lua_pushinteger(L, error);
+		return 2;
+	}
+
+	lua_pushstring(L, rdir);
+	free(dir);
+	return 1;
+}
+
+static int sysutil_checkip(lua_State * L)
+{
+	char buf[128];
+	int ipv4, ipv6, ntop;
+	const char * strp;
+
+	strp = NULL;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 
 	ntop = lua_gettop(L);
 	if (ntop >= 1 && lua_type(L, 1) == LUA_TSTRING)
-		newdir = lua_tolstring(L, 1, NULL);
-
-	if (newdir && newdir[0]) {
-		error = chdir(newdir);
-		if (error == -1) {
-			error = errno;
-			lua_pushnil(L);
-			lua_pushinteger(L, error);
-			return 2;
-		}
-		lua_pushboolean(L, 1);
-		return 1;
-	} else {
-		char * curdir, * cdir;
-		curdir = (char *) calloc(0x1, APPUTIL_BUFSIZE);
-		if (curdir == NULL) {
-			lua_pushnil(L);
-			lua_pushinteger(L, ENOMEM);
-			return 2;
-		}
-
-		cdir = getcwd(curdir, APPUTIL_BUFSIZE - 1);
-		if (cdir == NULL) {
-			error = errno;
-			free(curdir);
-			lua_pushnil(L);
-			lua_pushinteger(L, error);
-			return 2;
-		}
-
-		lua_pushstring(L, cdir);
-		free(curdir);
-		return 1;
+		strp = lua_tolstring(L, 1, NULL);
+	if (strp == NULL || strp[0] == '\0') {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
 	}
+
+	ipv4 = inet_pton(AF_INET,  strp, (void *) buf);
+	ipv6 = inet_pton(AF_INET6, strp, (void *) buf);
+	lua_pushboolean(L, ipv4 == 1);
+	lua_pushboolean(L, ipv6 == 1);
+	return 2;
+}
+
+static int sysutil_checkmask(lua_State * L)
+{
+	const char * strp;
+	int idx, ret, maskv;
+	unsigned int addr[2], tmpv;
+
+	strp = NULL;
+	idx = lua_gettop(L);
+	if (idx >= 1 && lua_type(L, 1) == LUA_TSTRING)
+		strp = lua_tolstring(L, 1, NULL);
+	if (strp == NULL || strp[0] == '\0') {
+		lua_pushnil(L);
+		lua_pushinteger(L, EFAULT);
+		return 2;
+	}
+
+	addr[0] = addr[1] = 0;
+	ret = inet_pton(AF_INET, strp, (void *) addr);
+	if (ret != 1) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	idx = 32;
+	tmpv = 0;
+	maskv = 0;
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+	addr[0] = __builtin_bswap32(addr[0]);
+#endif
+	while (idx > 0) {
+		idx--;
+		if ((addr[0] & (0x1u << idx)) == 0)
+			break;
+		maskv++;
+		tmpv |= (0x1u << idx);
+	}
+
+	if (tmpv == addr[0])
+		lua_pushinteger(L, maskv);
+	else
+		lua_pushboolean(L, 0);
+	if (sizeof(lua_Integer) == 8)
+		lua_pushinteger(L, (lua_Integer) addr[0]);
+	else if (addr[0] >= 0x80000000u)
+		lua_pushnumber(L, (lua_Number) addr[0]);
+	else
+		lua_pushinteger(L, (lua_Integer) addr[0]);
+	return 2;
 }
 
 static int sysutil_sync(lua_State * L)
@@ -1773,16 +2173,18 @@ static int sysutil_sync(lua_State * L)
 	if (fd >= 1 && sysutil_isinteger(L, 1, &luai)) {
 		fd = (int) luai;
 		fd = syncfs(fd);
-		if (fd == -1) {
-			fd = errno;
-			lua_pushboolean(L, 0);
-			lua_pushinteger(L, fd);
-			return 2;
-		}
 	} else {
+		fd = 0;
 		sync();
 	}
-	lua_pushboolean(L, 1);
+
+	if (fd < 0) {
+		fd = errno;
+		lua_pushboolean(L, 0);
+		lua_pushinteger(L, fd);
+		return 2;
+	}
+	lua_pushinteger(L, fd);
 	return 1;
 }
 
@@ -1813,20 +2215,18 @@ err0:
 		dst == NULL || dst[0] == '\0')
 		goto err0;
 
-	if (ntop >= 3 &&
-		lua_type(L, 3) == LUA_TBOOLEAN &&
-		lua_toboolean(L, 3))
+	if (ntop >= 3 && lua_toboolean(L, 3))
 		error = link(src, dst);
 	else
 		error = symlink(src, dst);
-	if (error == -1) {
+	if (error < 0) {
 		error = errno;
 		lua_pushnil(L);
 		lua_pushinteger(L, error);
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, error);
 	return 1;
 }
 
@@ -1866,7 +2266,7 @@ static int sysutil_mkfifo(lua_State * L)
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, ret);
 	return 1;
 }
 
@@ -1888,11 +2288,12 @@ static int sysutil_chmod(lua_State * L)
 	}
 
 	mode = (mode_t) luai;
+	ret = 0;
 	luai = 0;
 	if (sysutil_isinteger(L, 1, &luai)) {
 		int pfd = (int) luai;
 		ret = fchmod(pfd, mode);
-		if (ret == -1) {
+		if (ret < 0) {
 			int error;
 			error = errno;
 			lua_pushnil(L);
@@ -1909,7 +2310,7 @@ static int sysutil_chmod(lua_State * L)
 			return 2;
 		}
 		ret = chmod(filp, mode);
-		if (ret == -1) {
+		if (ret < 0) {
 			int error;
 			error = errno;
 			lua_pushnil(L);
@@ -1923,7 +2324,7 @@ static int sysutil_chmod(lua_State * L)
 		return 2;
 	}
 
-	lua_pushboolean(L, 1);
+	lua_pushinteger(L, ret);
 	return 1;
 }
 
@@ -1967,15 +2368,15 @@ static int sysutil_close(lua_State * L)
 	int ntop, idx;
 	int number, error;
 
-	number = error = 0;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 
+	number = error = 0;
 	ntop = lua_gettop(L);
 	for (idx = 1; idx <= ntop; ++idx) {
 		int fd = -1;
 		if (lua_type(L, idx) == LUA_TNUMBER)
-			fd = lua_tointeger(L, idx);
+			fd = (int) lua_tointeger(L, idx);
 		if (fd >= 0) {
 			if (close(fd) == 0)
 				number++;
@@ -1991,44 +2392,7 @@ static int sysutil_close(lua_State * L)
 
 static int sysutil_cloexec(lua_State * L)
 {
-	lua_Integer luai;
-	int ntop, fd, cloexec;
-
-	fd = -1;
-	cloexec = 1;
-	if (sysutil_checkstack(L, 2) < 0)
-		return 0;
-
-	luai = 0;
-	ntop = lua_gettop(L);
-	if (ntop >= 1 && sysutil_isinteger(L, 1, &luai))
-		fd = (int) luai;
-	if (ntop >= 2 && lua_type(L, 2) == LUA_TBOOLEAN)
-		cloexec = lua_toboolean(L, 2);
-
-	ntop = fcntl(fd, F_GETFD, 0);
-	if (ntop == -1) {
-		ntop = errno;
-		lua_pushinteger(L, ntop);
-		return 1;
-	}
-
-	if (cloexec != 0)
-		cloexec = ntop | FD_CLOEXEC;
-	else
-		cloexec = ntop & ~FD_CLOEXEC;
-	if (ntop == cloexec) {
-		lua_pushinteger(L, 0);
-		return 1;
-	}
-
-	if (fcntl(fd, F_SETFD, cloexec) == -1) {
-		ntop = errno;
-		lua_pushinteger(L, ntop);
-		return 1;
-	}
-	lua_pushinteger(L, 0);
-	return 1;
+	return sysutil_fcntl_common(L, F_GETFD, F_SETFD, FD_CLOEXEC);
 }
 
 static int sysutil_open(lua_State * L)
@@ -2093,8 +2457,8 @@ static int sysutil_lseek(lua_State * L)
 		pfd = (int) l_num;
 
 	l_num = 0;
-	if (ntop >= 2 && lua_isnumber(L, 2))
-		offs = (off_t) lua_tonumber(L, 2);
+	if (ntop >= 2 && sysutil_isinteger(L, 2, &l_num))
+		offs = (off_t) l_num;
 
 	l_num = 0;
 	if (ntop >= 3 && sysutil_isinteger(L, 3, &l_num))
@@ -2116,6 +2480,8 @@ static int sysutil_lseek(lua_State * L)
 
 	if (sizeof(lua_Integer) == 0x8)
 		lua_pushinteger(L, (lua_Integer) off1);
+	else if (off1 <= 0x7FFFFFFF)
+		lua_pushinteger(L, (lua_Integer) off1);
 	else
 		lua_pushnumber(L, (lua_Number) off1);
 	return 1;
@@ -2127,6 +2493,8 @@ static int sysutil_strerror(lua_State * L)
 	char errmsg[192];
 	lua_Integer lua_i;
 	unsigned long rval;
+	const unsigned long ulongm = ~0ul;
+	const unsigned long uerrnm = 4096;
 
 	lua_i = 0;
 	if (sysutil_checkstack(L, 2) < 0)
@@ -2143,7 +2511,7 @@ static int sysutil_strerror(lua_State * L)
 		return 1;
 	}
 
-	if (rval >= 128 && rval != ~0ul) {
+	if (rval >= uerrnm && rval <= (ulongm - uerrnm)) {
 		const char * ptr = (const char *) rval;
 		if (ptr[0] != '\0') {
 			lua_pushstring(L, ptr);
@@ -2158,40 +2526,30 @@ static int sysutil_strerror(lua_State * L)
 static int sysutil_getenv(lua_State * L)
 {
 	int ntop;
-	char * dupstr;
 	const char * envp;
 	const char * valp;
 
-	dupstr = NULL;
-	envp = valp = NULL;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
 
+	envp = NULL;
 	ntop = lua_gettop(L);
-	if (ntop >= 1 && lua_isstring(L, 1))
+	if (ntop >= 1 && lua_type(L, 1) == LUA_TSTRING)
 		envp = lua_tolstring(L, 1, NULL);
-
 	if (envp == NULL || envp[0] == '\0') {
-		lua_pushboolean(L, 0);
-		return 1;
-	}
-
-	dupstr = (char *) calloc(0x1, APPUTIL_BUFSIZE);
-	if (dupstr == NULL) {
-		lua_pushboolean(L, 0);
-		return 1;
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
 	}
 
 	valp = getenv(envp);
 	if (valp == NULL) {
-		free(dupstr);
-		lua_pushboolean(L, 0);
-		return 1;
+		lua_pushnil(L);
+		lua_pushinteger(L, ENOENT);
+		return 2;
 	}
 
-	strncpy(dupstr, valp, APPUTIL_BUFSIZE - 1);
-	lua_pushstring(L, dupstr);
-	free(dupstr);
+	lua_pushstring(L, valp);
 	return 1;
 }
 
@@ -2209,15 +2567,18 @@ static int sysutil_setenv(lua_State * L)
 	ntop = lua_gettop(L);
 	if (ntop >= 1 && lua_isstring(L, 1))
 		envp = lua_tolstring(L, 1, NULL);
-	if (envp == NULL || envp[0] == '\0')
-		goto err0;
+	if (envp == NULL || envp[0] == '\0') {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
 
 	if (ntop >= 2 && lua_isstring(L, 2))
 		valp = lua_tolstring(L, 2, NULL);
 
 	if (valp && valp[0] != '\0') {
-		int override = 0;
-		if (ntop >= 3 && lua_isboolean(L, 3))
+		int override = 1;
+		if (ntop >= 3 && lua_type(L, 3) == LUA_TBOOLEAN)
 			override = lua_toboolean(L, 3);
 		errno = 0;
 		rval = setenv(envp, valp, override);
@@ -2226,10 +2587,13 @@ static int sysutil_setenv(lua_State * L)
 		rval = unsetenv(envp);
 	}
 
-	if (rval == -1)
+	if (rval == -1) {
 		rval = errno;
-err0:
-	lua_pushboolean(L, rval);
+		lua_pushnil(L);
+		lua_pushinteger(L, rval);
+		return 2;
+	}
+	lua_pushinteger(L, rval);
 	return 1;
 }
 
@@ -2351,12 +2715,14 @@ static int sysutil_exitval(lua_State * L)
 	int eval;
 	lua_Integer luai;
 
-	luai = 0;
 	if (sysutil_checkstack(L, 2) < 0)
 		return 0;
-	if (!sysutil_isinteger(L, 1, &luai)) {
+
+	luai = 0;
+	if (sysutil_isinteger(L, 1, &luai) == 0) {
 		lua_pushnil(L);
-		return 1;
+		lua_pushinteger(L, EINVAL);
+		return 2;
 	}
 
 	eval = (int) luai;
@@ -2367,8 +2733,16 @@ static int sysutil_exitval(lua_State * L)
 		return 2;
 	}
 
-	lua_pushboolean(L, 0);
-	return 1;
+	if (WIFSIGNALED(eval)) {
+		lua_pushboolean(L, 0);
+		luai = (lua_Integer) WTERMSIG(eval);
+		lua_pushinteger(L, luai);
+		return 2;
+	}
+
+	lua_pushnil(L);
+	lua_pushinteger(L, ERANGE);
+	return 2;
 }
 
 static int sysutil_fcntl(lua_State * L)
@@ -2433,8 +2807,7 @@ static int sysutil_base64(lua_State * L)
 		return 2;
 	}
 
-	if (ret >= 2 && lua_type(L, 2) == LUA_TBOOLEAN &&
-		lua_toboolean(L, 2)) {
+	if (ret >= 2 && lua_toboolean(L, 2)) {
 		// base64 buffer decode
 		dlen = B64_DECODE_LEN(rlen) + 4;
 		outd = (char *) malloc(dlen);
@@ -2567,10 +2940,10 @@ static int sysutil_lockfile(lua_State * L)
 		}
 	}
 
-	if (timeout > 0) {
-		spec.tv_sec = 0; spec.tv_nsec = 0;
+	spec.tv_sec = 0;
+	spec.tv_nsec = 0;
+	if (timeout > 0)
 		clock_gettime(CLOCK_BOOTTIME, &spec);
-	}
 
 	for (;;) {
 		int error;
@@ -2610,10 +2983,14 @@ static int sysutil_lockfile(lua_State * L)
 
 	if (fptr && msglen > 0) {
 		struct stat st;
-		ret = fstat(fd, &st);
-		if (ret == 0 && st.st_size >= 65536)
+		st.st_size = 0;
+		if (fptr[0] == 0x1b) {
+			ftruncate(fd, 0);
+			lseek(fd, 0, SEEK_SET);
+		} else if (fstat(fd, &st) == 0 && st.st_size >= 65536) {
 			ftruncate(fd, 128);
-		lseek(fd, 0, SEEK_END);
+			lseek(fd, 0, SEEK_END);
+		}
 		if (write(fd, fptr, msglen) == (ssize_t) msglen) {
 			fsync(fd);
 		}
@@ -2629,6 +3006,8 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "basename",       sysutil_basename },
 	{ "call",           sysutil_call },
 	{ "chdir",          sysutil_chdir },
+	{ "checkip",        sysutil_checkip },
+	{ "checkmask",      sysutil_checkmask },
 	{ "chmod",          sysutil_chmod },
 	{ "cloexec",        sysutil_cloexec },
 	{ "close",          sysutil_close },
@@ -2640,6 +3019,7 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "getid",          sysutil_getid },       /* calls pthread_self() */
 	{ "getpid",         sysutil_getpid },
 	{ "getppid",        sysutil_getppid },
+	{ "getwd",          sysutil_getwd },
 	{ "glob",           sysutil_glob },
 	{ "inotify",        sysutil_inotify },
 	{ "kill",           sysutil_kill },
@@ -2651,6 +3031,7 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "mkdir",          sysutil_mkdir },
 	{ "mkfifo",         sysutil_mkfifo },
 	{ "mountpoint",     sysutil_mountpoint },
+	{ "nonblock",       sysutil_nonblock },
 	{ "open",           sysutil_open },
 	{ "read",           sysutil_read },
 	{ "readlink",       sysutil_readlink },
@@ -2661,17 +3042,21 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "setenv",         sysutil_setenv },
 	{ "setname",        sysutil_setname },
 	{ "sha256",         sysutil_sha256 },
+	{ "signal",         sysutil_signal },
 	{ "stat",           sysutil_stat },
 	{ "strerror",       sysutil_strerror },
 	{ "symlink",        sysutil_symlink },
 	{ "sync",           sysutil_sync },
 	{ "tcpcheck",       sysutil_tcpcheck },
+	{ "timestr",        sysutil_timestr },
+	{ "timedur",        sysutil_timedur },
 	{ "unlink",         sysutil_unlink },
 	{ "upmsec",         sysutil_upmsec },
 	{ "uptime",         sysutil_uptime },
 	{ "waitpid",        sysutil_waitpid },
 	{ "write",          sysutil_write },
 	{ "zipstdio",       sysutil_zipstdio },
+	{ place_holder,     NULL },
 	{ place_holder,     NULL },
 	{ place_holder,     NULL },
 	{ place_holder,     NULL },
@@ -2717,6 +3102,9 @@ int luaopen_sysutil(lua_State * L)
 
 	lua_pushinteger(L, APPUTIL_OPTION_SYMLINK);
 	lua_setfield(L, -2, "OPT_SYMLINK");
+
+	lua_pushinteger(L, APPUTIL_OPTION_EXEC);
+	lua_setfield(L, -2, "OPT_EXEC");
 
 	lua_pushinteger(L, ETIMEDOUT);
 	lua_setfield(L, -2, "ETIMEDOUT");

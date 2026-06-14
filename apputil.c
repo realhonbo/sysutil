@@ -521,6 +521,13 @@ int apputil_call(apputil_t app_, const void * indata, unsigned int inlen)
 		return -EINVAL;
 	}
 
+	/* do not create PIPEs if we're not allowed to fork */
+	if (opts & APPUTIL_OPTION_EXEC) {
+		inlen = 0;
+		indata = NULL;
+		opts &= ~(APPUTIL_OPTION_INPUT | APPUTIL_OPTION_OUTPUT | APPUTIL_OPTION_OUTALL);
+	}
+
 	app->exitval = 0;
 	APPUTIL_CLOSE(app->stdin_fd);
 	APPUTIL_CLOSE(app->stdout_fd);
@@ -572,7 +579,10 @@ int apputil_call(apputil_t app_, const void * indata, unsigned int inlen)
 		appf_pipesize(outfd[1], psize, 1);
 	}
 
-	pid = fork();
+	if ((opts & APPUTIL_OPTION_EXEC) == 0) {
+		/* in most cases, we need to fork */
+		pid = fork();
+	}
 	if (pid == -1) {
 		error = errno;
 		fprintf(stderr, "Error, failed to fork child process: %s\n", strerror(error));
@@ -634,11 +644,13 @@ int apputil_call(apputil_t app_, const void * indata, unsigned int inlen)
 		}
 
 		if (opts & APPUTIL_OPTION_CLOSER) {
-			int startfd = STDERR_FILENO + 1;
 			long maxfd = sysconf(_SC_OPEN_MAX);
-			if (maxfd <= startfd)
-				maxfd = 1024;
-			appf_closefds(startfd, maxfd, 1);
+			const int startfd = STDERR_FILENO + 1;
+			if (maxfd < 256)
+				maxfd = 256;
+			else if (maxfd > 2048)
+				maxfd = 2048;
+			appf_closefds(startfd, (int) maxfd, 1);
 		}
 
 		if (opts & APPUTIL_OPTION_LOWPRI) {
