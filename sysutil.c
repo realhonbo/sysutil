@@ -3819,7 +3819,7 @@ error:
 		errno = 0;
 		endptr = NULL;
 		pid = (unsigned int) strtoul(paddr, &endptr, 0);
-		if (errno != 0 || endptr == paddr || pid == ~0ul)
+		if (errno != 0 || endptr == paddr || pid == ~0u)
 			pid = 0;
 		memset(&addr, 0, sizeof(addr));
 		addr.nl_family = AF_NETLINK;
