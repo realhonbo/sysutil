@@ -1,5 +1,5 @@
 package = "sysutil"
-version = "1.0.0-0"
+version = "1.0.0-1"
 
 source = {
 	url = "git://github.com/jaqchen/sysutil",
@@ -24,6 +24,9 @@ build = {
    type = "make",
 
    build_target = "sysutil.so",
+   build_variables = {
+      LUA_INCDIR = "$(LUA_INCDIR)",
+   },
 
    install = {
 	  lib = {

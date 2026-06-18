@@ -16,7 +16,6 @@ MAKEFLAGS += -r -R
 CC        ?= gcc
 STRIP     ?= strip
 
-LUA_INCDIR ?= /usr/include/lua5.1
 
 CFLAGS     = -Wall -Wno-unused-result -fPIC -D_GNU_SOURCE -ggdb -Os
 CFLAGS    += -I. -I$(LUA_INCDIR) $(EXTRA_CFLAGS)
