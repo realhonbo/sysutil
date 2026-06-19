@@ -181,6 +181,25 @@ local syscon_t = {
 	["EUSERS"]                           = 0x57,
 	["ENOTSOCK"]                         = 0x58,
 	-- =============================================
+	["RLIMIT_CPU"]                       = 0x0,
+	["RLIMIT_FSIZE"]                     = 0x1,
+	["RLIMIT_DATA"]                      = 0x2,
+	["RLIMIT_STACK"]                     = 0x3,
+	["RLIMIT_CORE"]                      = 0x4,
+	["RLIMIT_RSS"]                       = 0x5,
+	["RLIMIT_NPROC"]                     = 0x6,
+	["RLIMIT_NOFILE"]                    = 0x7,
+	["RLIMIT_MEMLOCK"]                   = 0x8,
+	["RLIMIT_AS"]                        = 0x9,
+	["RLIMIT_LOCKS"]                     = 0xa,
+	["RLIMIT_SIGPENDING"]                = 0xb,
+	["RLIMIT_MSGQUEUE"]                  = 0xc,
+	["RLIMIT_NICE"]                      = 0xd,
+	["RLIMIT_RTPRIO"]                    = 0xe,
+	["RLIMIT_RTTIME"]                    = 0xf,
+	["RLIMIT_NLIMITS"]                   = 0x10,
+	["RLIM_INFINITY"]                    = -1,
+	-- =============================================
 }
 
 return syscon_t

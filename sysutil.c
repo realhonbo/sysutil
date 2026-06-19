@@ -4055,6 +4055,84 @@ error:
 	return sysutil_push_addr(L, addr, slt, 1);
 }
 
+static int sysutil_getsockname(lua_State * L)
+{
+	socklen_t slt;
+	lua_Integer value;
+	int ret, fd;
+	struct sockaddr_storage addr;
+
+	ret = lua_gettop(L);
+	if (ret < 1) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	if (sysutil_isinteger(L, 1, &value) == 0) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+	if (value < 0 || value > INT_MAX) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EBADF);
+		return 2;
+	}
+	fd = (int) value;
+
+	slt = sizeof(addr);
+	memset(&addr, 0, sizeof(addr));
+	ret = getsockname(fd, (struct sockaddr *) &addr, &slt);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	return sysutil_push_addr(L, (char *) &addr, slt, 0);
+}
+
+static int sysutil_getpeername(lua_State * L)
+{
+	socklen_t slt;
+	lua_Integer value;
+	int ret, fd;
+	struct sockaddr_storage addr;
+
+	ret = lua_gettop(L);
+	if (ret < 1) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	if (sysutil_isinteger(L, 1, &value) == 0) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+	if (value < 0 || value > INT_MAX) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EBADF);
+		return 2;
+	}
+	fd = (int) value;
+
+	slt = sizeof(addr);
+	memset(&addr, 0, sizeof(addr));
+	ret = getpeername(fd, (struct sockaddr *) &addr, &slt);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	return sysutil_push_addr(L, (char *) &addr, slt, 0);
+}
+
 static int sysutil_sendto(lua_State * L)
 {
 	ssize_t rval;
@@ -4193,6 +4271,9 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "getid",          sysutil_getid },       /* calls pthread_self() */
 	{ "getpid",         sysutil_getpid },
 	{ "getppid",        sysutil_getppid },
+	{ "getcwd",         sysutil_getcwd },
+	{ "getsockname",    sysutil_getsockname },
+	{ "getpeername",    sysutil_getpeername },
 	{ "getrlimit",      sysutil_getrlimit },
 	{ "getsockopt",     sysutil_getsockopt },
 	{ "glob",           sysutil_glob },
