@@ -57,6 +57,9 @@
   #define IFNAMSIZ 16
 #endif
 
+#if LUA_VERSION_NUM <= 501
+static const char placeholder[] = "\x00";
+#endif
 extern int luaopen_sysutil(lua_State * L) __attribute__((visibility("default")));
 
 static int sysutil_checkstack(lua_State * lua, int num)
@@ -4238,6 +4241,28 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "waitpid",        sysutil_waitpid },
 	{ "write",          sysutil_write },
 	{ "zipstdio",       sysutil_zipstdio },
+#if LUA_VERSION_NUM <= 501
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+	{ placeholder,      NULL },
+#endif
 	{ NULL,             NULL },
 };
 
