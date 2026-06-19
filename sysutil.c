@@ -57,7 +57,6 @@
   #define IFNAMSIZ 16
 #endif
 
-static const char place_holder[] = "placeholder";
 extern int luaopen_sysutil(lua_State * L) __attribute__((visibility("default")));
 
 static int sysutil_checkstack(lua_State * lua, int num)
@@ -77,20 +76,28 @@ static int sysutil_isinteger(lua_State * L,
 	int num, lua_Integer * intp)
 {
 	int dtype;
-	lua_Number num_l;
 	lua_Integer int_l;
 
 	dtype = lua_type(L, num);
 	if (dtype != LUA_TNUMBER)
 		return 0;
 
-	num_l = lua_tonumber(L, num);
+#if LUA_VERSION_NUM <= 501
 	int_l = lua_tointeger(L, num);
-	if (num_l == (lua_Number) int_l) {
+	if (lua_tonumber(L, num) == (lua_Number) int_l) {
 		if (intp != NULL)
 			*intp = int_l;
 		return 1;
 	}
+#else
+	dtype = 0;
+	int_l = lua_tointegerx(L, num, &dtype);
+	if (dtype != 0) {
+		if (intp != NULL)
+			*intp = int_l;
+		return 1;
+	}
+#endif
 	return 0;
 }
 
@@ -4182,30 +4189,17 @@ static const luaL_Reg sysutil_regs[] = {
 	{ "waitpid",        sysutil_waitpid },
 	{ "write",          sysutil_write },
 	{ "zipstdio",       sysutil_zipstdio },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
-	{ place_holder,     NULL },
 	{ NULL,             NULL },
 };
 
 int luaopen_sysutil(lua_State * L)
 {
 #if LUA_VERSION_NUM >= 502
-	luaL_newlib(L, sysutil_regs);
+	/* Expanded from macro `luaL_newlib. */
+	/* 90: reserve extra slots from following constants: */
+	luaL_checkversion(L);
+	lua_createtable(L, 0, 90);
+	luaL_setfuncs(L, sysutil_regs, 0);
 #else
 	luaL_register(L, "sysutil", sysutil_regs);
 #endif
