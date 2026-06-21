@@ -225,6 +225,37 @@ static int sysutil_accept(lua_State * L)
 	return sysutil_push_addr(L, addr, slt, 1);
 }
 
+static int sysutil_access(lua_State * L)
+{
+	lua_Integer l_int;
+	const char * fpath;
+	int mode, ntop, ret;
+
+	mode = F_OK;
+	ntop = lua_gettop(L);
+	fpath = sysutil_isstring(L, ntop, 1, NULL);
+	if (empty_str(fpath)) {
+		lua_pushnil(L);
+		lua_pushinteger(L, EINVAL);
+		return 2;
+	}
+
+	l_int = 0;
+	if (sysutil_isinteger(L, ntop, 2, &l_int))
+		mode = (int) l_int;
+
+	ret = access(fpath, mode);
+	if (ret < 0) {
+		ret = errno;
+		lua_pushnil(L);
+		lua_pushinteger(L, ret);
+		return 2;
+	}
+
+	lua_pushinteger(L, ret);
+	return 1;
+}
+
 static int sysutil_uptime(lua_State * L)
 {
 	int ret, ntop;
@@ -4592,6 +4623,7 @@ error:
 
 static const luaL_Reg sysutil_regs[] = {
 	{ "accept",         sysutil_accept },
+	{ "access",         sysutil_access },
 	{ "base64",         sysutil_base64 },
 	{ "basename",       sysutil_basename },
 	{ "bind",           sysutil_bind },
