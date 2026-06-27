@@ -31,10 +31,10 @@ build = {
 
    install = {
 	  lib = {
+		 ["syscon"] = "syscon.so",
 		 ["sysutil"] = "sysutil.so",
 	  },
 	  lua = {
-		 ["sysutil.syscon"] = "sysutil/syscon.lua",
 		 ["sysutil.cgroup"] = "sysutil/cgroup.lua",
 	  },
    },
