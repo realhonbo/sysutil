@@ -46,10 +46,10 @@
 		lua_setfield(L, __topn, sc_name_); \
 	} while (0)
 
-extern int luaopen_syscon(lua_State * L)
+extern int luaopen_sysutil_syscon(lua_State * L)
 	__attribute__((visibility("default")));
 
-int luaopen_syscon(lua_State * L)
+int luaopen_sysutil_syscon(lua_State * L)
 {
 #if LUA_VERSION_NUM >= 502
 	luaL_checkversion(L);

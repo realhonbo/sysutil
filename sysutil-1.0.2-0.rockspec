@@ -24,14 +24,14 @@ dependencies = {
 build = {
    type = "make",
 
-   build_target = "sysutil.so",
+   build_target = "all",
    build_variables = {
       LUA_INCDIR = "$(LUA_INCDIR)",
    },
 
    install = {
 	  lib = {
-		 ["syscon"] = "syscon.so",
+		 ["sysutil.syscon"] = "syscon.so",
 		 ["sysutil"] = "sysutil.so",
 	  },
 	  lua = {
